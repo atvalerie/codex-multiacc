@@ -2,6 +2,15 @@ name: blob-size-policy
 
 on:
   workflow_dispatch:
+    inputs:
+      base-sha:
+        description: "Base commit to compare. Defaults to HEAD~1."
+        required: false
+        default: ""
+      head-sha:
+        description: "Head commit to compare. Defaults to the workflow commit."
+        required: false
+        default: ""
 
 jobs:
   check:
@@ -17,10 +26,24 @@ jobs:
       - name: Determine PR comparison range
         id: range
         shell: bash
+        env:
+          INPUT_BASE_SHA: ${{ inputs.base-sha }}
+          INPUT_HEAD_SHA: ${{ inputs.head-sha }}
         run: |
           set -euo pipefail
-          echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-          echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          base="${INPUT_BASE_SHA}"
+          head="${INPUT_HEAD_SHA:-${GITHUB_SHA}}"
+
+          if [[ -z "${base}" ]]; then
+            if git rev-parse "${head}^" >/dev/null 2>&1; then
+              base="$(git rev-parse "${head}^")"
+            else
+              base="$(git rev-list --max-parents=0 "${head}" | tail -n1)"
+            fi
+          fi
+
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+          echo "head=${head}" >> "$GITHUB_OUTPUT"
 
       - name: Check changed blob sizes
         env:
