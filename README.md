@@ -1,3 +1,31 @@
+## Cowodex Multi-Account Build
+
+This fork packages a debug build of Codex with multi-account support. It installs a `cowodex` command and also provides a `codex` bin for people who want it to replace their existing Codex command.
+
+Install the release `.tgz` with your preferred Node package manager:
+
+```shell
+pnpm add -g ./local-cowodex-0.130.0-multiacc.tgz
+```
+
+```shell
+npm install -g ./local-cowodex-0.130.0-multiacc.tgz
+```
+
+Useful account commands:
+
+```shell
+cowodex login
+cowodex login accounts
+cowodex login use <account-id>
+cowodex login logout <account-id>
+cowodex login remove <account-id>
+```
+
+Inside the TUI, use `/accounts` for account management. The status bar shows remaining usage instead of usage consumed, and Codex can swap to another signed-in account when the active account is limited.
+
+---
+
 <p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
