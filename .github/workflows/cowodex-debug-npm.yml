@@ -55,14 +55,24 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Install Linux build dependencies
+      - name: Install Zig for Linux MUSL builds
+        if: ${{ matrix.os == 'linux' }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Install Linux MUSL build tools
+        if: ${{ matrix.os == 'linux' }}
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Install Linux packaging dependencies
         if: ${{ matrix.os == 'linux' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            musl-tools pkg-config libcap-dev ripgrep
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep
 
       - name: Install macOS packaging dependencies
         if: ${{ matrix.os == 'macos' }}
