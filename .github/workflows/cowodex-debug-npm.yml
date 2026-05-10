@@ -26,18 +26,23 @@ jobs:
         include:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
+            vendor_target: x86_64-pc-windows-msvc
             os: windows
           - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
+            vendor_target: x86_64-unknown-linux-musl
             os: linux
           - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+            target: aarch64-unknown-linux-gnu
+            vendor_target: aarch64-unknown-linux-musl
             os: linux
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            vendor_target: x86_64-apple-darwin
             os: macos
           - runner: macos-15
             target: aarch64-apple-darwin
+            vendor_target: aarch64-apple-darwin
             os: macos
 
     steps:
@@ -46,7 +51,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Linux UBSan runtime
-        if: ${{ matrix.os == 'linux' }}
+        if: ${{ contains(matrix.target, 'linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -58,27 +63,27 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Configure Linux MUSL rusty_v8 artifact override
-        if: ${{ matrix.os == 'linux' }}
+        if: ${{ contains(matrix.target, 'linux-musl') }}
         uses: ./.github/actions/setup-rusty-v8-musl
         with:
           target: ${{ matrix.target }}
 
       - name: Install Zig for Linux MUSL builds
-        if: ${{ matrix.os == 'linux' }}
+        if: ${{ contains(matrix.target, 'linux-musl') }}
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.14.0
           use-cache: false
 
       - name: Install Linux MUSL build tools
-        if: ${{ matrix.os == 'linux' }}
+        if: ${{ contains(matrix.target, 'linux-musl') }}
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
       - name: Configure Linux MUSL rustc UBSan wrapper
-        if: ${{ matrix.os == 'linux' }}
+        if: ${{ contains(matrix.target, 'linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -101,7 +106,7 @@ jobs:
           echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Clear Linux MUSL sanitizer flags
-        if: ${{ matrix.os == 'linux' }}
+        if: ${{ contains(matrix.target, 'linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -135,7 +140,10 @@ jobs:
       - name: Install Linux packaging dependencies
         if: ${{ matrix.os == 'linux' }}
         shell: bash
-        run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libcap-dev pkg-config ripgrep
 
       - name: Install macOS packaging dependencies
         if: ${{ matrix.os == 'macos' }}
@@ -174,9 +182,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $target = "${{ matrix.target }}"
+          $vendorTarget = "${{ matrix.vendor_target }}"
           $profileDir = Join-Path "target" $target
           $debugDir = Join-Path $profileDir "debug"
-          $vendorRoot = Join-Path $env:GITHUB_WORKSPACE "native-vendor\$target"
+          $vendorRoot = Join-Path $env:GITHUB_WORKSPACE "native-vendor\$vendorTarget"
           $vendorCodex = Join-Path $vendorRoot "codex"
           $vendorPath = Join-Path $vendorRoot "path"
           New-Item -ItemType Directory -Force $vendorCodex, $vendorPath | Out-Null
@@ -200,8 +209,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: native-vendor-${{ matrix.target }}
-          path: native-vendor/${{ matrix.target }}
+          name: native-vendor-${{ matrix.vendor_target }}
+          path: native-vendor/${{ matrix.vendor_target }}
           if-no-files-found: error
 
   package:
