@@ -12,6 +12,12 @@ pnpm add -g ./local-cowodex-0.130.0-multiacc.tgz
 npm install -g ./local-cowodex-0.130.0-multiacc.tgz
 ```
 
+If you are on Windows or `.tgz` installs don't work, try:
+
+```shell
+pnpm add -g "file:(pathtocodex)/local-cowodex-0.130.0-multiacc.tgz"
+```
+
 Useful account commands:
 
 ```shell
