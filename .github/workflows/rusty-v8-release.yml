@@ -1,9 +1,7 @@
 name: rusty-v8-release
 
 on:
-  push:
-    tags:
-      - "rusty-v8-v*.*.*"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}::${{ github.ref_name }}

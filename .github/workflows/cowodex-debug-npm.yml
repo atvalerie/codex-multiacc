@@ -49,6 +49,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Configure Linux MUSL rusty_v8 artifact override
+        if: ${{ matrix.os == 'linux' }}
+        uses: ./.github/actions/setup-rusty-v8-musl
+        with:
+          target: ${{ matrix.target }}
+
       - name: Install Linux build dependencies
         if: ${{ matrix.os == 'linux' }}
         shell: bash
