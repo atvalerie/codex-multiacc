@@ -254,6 +254,10 @@ jobs:
           const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
           packageJson.name = "@local/cowodex";
           packageJson.version = process.env.VERSION;
+          packageJson.repository = {
+            type: "git",
+            url: "git+https://github.com/atvalerie/codex-multiacc.git",
+          };
           packageJson.files = ["bin", "vendor"];
           packageJson.bin = {
             codex: "bin/codex.js",

@@ -6,10 +6,15 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
 }
 
 pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::Result<String> {
-    latest_tag_name
+    let version = latest_tag_name
         .strip_prefix("rust-v")
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse latest tag name '{latest_tag_name}'"))
+        .or_else(|| latest_tag_name.strip_prefix('v'))
+        .unwrap_or(latest_tag_name);
+    if parse_version(version).is_some() {
+        Ok(version.to_string())
+    } else {
+        anyhow::bail!("Failed to parse latest tag name '{latest_tag_name}'");
+    }
 }
 
 pub(crate) fn is_source_build_version(version: &str) -> bool {
@@ -20,7 +25,7 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut iter = v.trim().split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
-    let pat = iter.next()?.parse::<u64>().ok()?;
+    let pat = iter.next()?.split('-').next()?.parse::<u64>().ok()?;
     Some((maj, min, pat))
 }
 
@@ -35,17 +40,26 @@ mod tests {
             extract_version_from_latest_tag("rust-v1.5.0").expect("failed to parse version"),
             "1.5.0"
         );
+        assert_eq!(
+            extract_version_from_latest_tag("v1.5.0").expect("failed to parse version"),
+            "1.5.0"
+        );
+        assert_eq!(
+            extract_version_from_latest_tag("1.5.0-multiacc").expect("failed to parse version"),
+            "1.5.0-multiacc"
+        );
     }
 
     #[test]
     fn latest_tag_without_prefix_is_invalid() {
-        assert!(extract_version_from_latest_tag("v1.5.0").is_err());
+        assert!(extract_version_from_latest_tag("cowodex").is_err());
     }
 
     #[test]
     fn prerelease_version_is_not_considered_newer() {
-        assert_eq!(is_newer("0.11.0-beta.1", "0.11.0"), None);
-        assert_eq!(is_newer("1.0.0-rc.1", "1.0.0"), None);
+        assert_eq!(is_newer("0.11.0-beta.1", "0.11.0"), Some(false));
+        assert_eq!(is_newer("1.0.0-rc.1", "1.0.0"), Some(false));
+        assert_eq!(is_newer("1.0.1-multiacc", "1.0.0-multiacc"), Some(true));
     }
 
     #[test]

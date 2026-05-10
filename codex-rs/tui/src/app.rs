@@ -38,7 +38,6 @@ use crate::external_editor;
 use crate::file_search::FileSearchManager;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
-#[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
 use crate::hooks_rpc::HookTrustUpdate;
 use crate::key_hint::KeyBindingListExt;
@@ -864,7 +863,6 @@ Fix the config and retry.\n\
 See the Codex keymap documentation for supported actions and examples."
             )
         })?;
-        #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
@@ -971,15 +969,18 @@ See the Codex keymap documentation for supported actions and examples."
         let mut listen_for_app_server_events = true;
         let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
 
-        #[cfg(not(debug_assertions))]
         let pre_loop_exit_reason = if let Some(latest_version) = upgrade_version {
+            #[cfg(not(debug_assertions))]
+            let update_action = crate::update_action::get_update_action();
+            #[cfg(debug_assertions)]
+            let update_action = None;
             let control = app
                 .handle_event(
                     tui,
                     &mut app_server,
                     AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
                         latest_version,
-                        crate::update_action::get_update_action(),
+                        update_action,
                     ))),
                 )
                 .await?;
@@ -990,8 +991,6 @@ See the Codex keymap documentation for supported actions and examples."
         } else {
             None
         };
-        #[cfg(debug_assertions)]
-        let pre_loop_exit_reason: Option<ExitReason> = None;
 
         let exit_reason_result = if let Some(exit_reason) = pre_loop_exit_reason {
             Ok(exit_reason)

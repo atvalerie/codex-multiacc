@@ -2,7 +2,7 @@
 // Unified entry point for the Codex CLI.
 
 import { spawn } from "node:child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { createRequire } from "node:module";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -158,6 +158,25 @@ function detectPackageManager() {
   return userAgent ? "npm" : null;
 }
 
+function getLauncherPackageMetadata() {
+  try {
+    const packageJsonPath = path.join(__dirname, "..", "package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+    const repository =
+      typeof packageJson.repository === "string"
+        ? packageJson.repository
+        : packageJson.repository?.url;
+    return {
+      name: typeof packageJson.name === "string" ? packageJson.name : null,
+      version:
+        typeof packageJson.version === "string" ? packageJson.version : null,
+      repository: typeof repository === "string" ? repository : null,
+    };
+  } catch {
+    return {};
+  }
+}
+
 const additionalDirs = [];
 const pathDir = path.join(archRoot, "path");
 if (existsSync(pathDir)) {
@@ -171,6 +190,17 @@ const packageManagerEnvVar =
     ? "CODEX_MANAGED_BY_BUN"
     : "CODEX_MANAGED_BY_NPM";
 env[packageManagerEnvVar] = "1";
+
+const launcherPackage = getLauncherPackageMetadata();
+if (launcherPackage.name && launcherPackage.name !== "@openai/codex") {
+  env.CODEX_DISTRIBUTION_PACKAGE = launcherPackage.name;
+  if (launcherPackage.version) {
+    env.CODEX_DISTRIBUTION_VERSION = launcherPackage.version;
+  }
+  if (launcherPackage.repository) {
+    env.CODEX_DISTRIBUTION_REPOSITORY = launcherPackage.repository;
+  }
+}
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",

@@ -1,9 +1,8 @@
-#![cfg(not(debug_assertions))]
-
 use crate::legacy_core::config::Config;
 use crate::npm_registry;
 use crate::npm_registry::NpmPackageInfo;
 use crate::update_action;
+use crate::update_action::DistributionInfo;
 use crate::update_action::UpdateAction;
 use crate::update_versions::extract_version_from_latest_tag;
 use crate::update_versions::is_newer;
@@ -20,11 +19,16 @@ use std::path::PathBuf;
 use crate::version::CODEX_CLI_VERSION;
 
 pub fn get_upgrade_version(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    let current_version = update_action::current_version(CODEX_CLI_VERSION);
+    if !config.check_for_update_on_startup || is_source_build_version(&current_version) {
         return None;
     }
 
+    #[cfg(not(debug_assertions))]
     let action = update_action::get_update_action();
+    #[cfg(debug_assertions)]
+    let action = None;
+    let distribution = update_action::third_party_distribution();
     let version_file = version_filepath(config);
     let info = read_version_info(&version_file).ok();
 
@@ -36,14 +40,14 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
         // isn’t blocked by a network call. The UI reads the previously cached
         // value (if any) for this run; the next run shows the banner if needed.
         tokio::spawn(async move {
-            check_for_update(&version_file, action)
+            check_for_update(&version_file, action, distribution)
                 .await
                 .inspect_err(|e| tracing::error!("Failed to update version: {e}"))
         });
     }
 
     info.and_then(|info| {
-        if is_newer(&info.latest_version, CODEX_CLI_VERSION).unwrap_or(false) {
+        if is_newer(&info.latest_version, &current_version).unwrap_or(false) {
             Some(info.latest_version)
         } else {
             None
@@ -63,7 +67,7 @@ struct VersionInfo {
 const VERSION_FILENAME: &str = "version.json";
 // We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
 const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
+const OPENAI_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
 
 #[derive(Deserialize, Debug, Clone)]
 struct ReleaseInfo {
@@ -84,8 +88,15 @@ fn read_version_info(version_file: &Path) -> anyhow::Result<VersionInfo> {
     Ok(serde_json::from_str(&contents)?)
 }
 
-async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> anyhow::Result<()> {
+async fn check_for_update(
+    version_file: &Path,
+    action: Option<UpdateAction>,
+    distribution: Option<DistributionInfo>,
+) -> anyhow::Result<()> {
     let latest_version = match action {
+        _ if distribution.is_some() => {
+            fetch_latest_github_release_version(distribution.as_ref()).await?
+        }
         Some(UpdateAction::BrewUpgrade) => {
             let HomebrewCaskInfo { version } = create_client()
                 .get(HOMEBREW_CASK_API_URL)
@@ -97,7 +108,7 @@ async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> 
             version
         }
         Some(UpdateAction::NpmGlobalLatest) | Some(UpdateAction::BunGlobalLatest) => {
-            let latest_version = fetch_latest_github_release_version().await?;
+            let latest_version = fetch_latest_github_release_version(None).await?;
             let package_info = create_client()
                 .get(npm_registry::PACKAGE_URL)
                 .send()
@@ -109,7 +120,7 @@ async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> 
             latest_version
         }
         Some(UpdateAction::StandaloneUnix) | Some(UpdateAction::StandaloneWindows) | None => {
-            fetch_latest_github_release_version().await?
+            fetch_latest_github_release_version(None).await?
         }
     };
 
@@ -129,11 +140,26 @@ async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> 
     Ok(())
 }
 
-async fn fetch_latest_github_release_version() -> anyhow::Result<String> {
+async fn fetch_latest_github_release_version(
+    distribution: Option<&DistributionInfo>,
+) -> anyhow::Result<String> {
+    let latest_release_url = match distribution {
+        Some(DistributionInfo {
+            github_repo: Some(repo),
+            ..
+        }) => format!("https://api.github.com/repos/{repo}/releases/latest"),
+        Some(info) => {
+            anyhow::bail!(
+                "distribution package {} does not declare a GitHub repository",
+                info.package
+            );
+        }
+        None => OPENAI_LATEST_RELEASE_URL.to_string(),
+    };
     let ReleaseInfo {
         tag_name: latest_tag_name,
     } = create_client()
-        .get(LATEST_RELEASE_URL)
+        .get(latest_release_url)
         .send()
         .await?
         .error_for_status()?
@@ -144,8 +170,10 @@ async fn fetch_latest_github_release_version() -> anyhow::Result<String> {
 
 /// Returns the latest version to show in a popup, if it should be shown.
 /// This respects the user's dismissal choice for the current latest version.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    let current_version = update_action::current_version(CODEX_CLI_VERSION);
+    if !config.check_for_update_on_startup || is_source_build_version(&current_version) {
         return None;
     }
 
@@ -162,6 +190,7 @@ pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
 
 /// Persist a dismissal for the current latest version so we don't show
 /// the update popup again for this version.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub async fn dismiss_version(config: &Config, version: &str) -> anyhow::Result<()> {
     let version_file = version_filepath(config);
     let mut info = match read_version_info(&version_file) {

@@ -3,6 +3,18 @@ use codex_install_context::InstallContext;
 #[cfg(any(not(debug_assertions), test))]
 use codex_install_context::StandalonePlatform;
 
+const OPENAI_CODEX_PACKAGE: &str = "@openai/codex";
+const DISTRIBUTION_PACKAGE_ENV: &str = "CODEX_DISTRIBUTION_PACKAGE";
+const DISTRIBUTION_REPOSITORY_ENV: &str = "CODEX_DISTRIBUTION_REPOSITORY";
+const DISTRIBUTION_VERSION_ENV: &str = "CODEX_DISTRIBUTION_VERSION";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DistributionInfo {
+    pub(crate) package: String,
+    pub(crate) version: Option<String>,
+    pub(crate) github_repo: Option<String>,
+}
+
 /// Update action the CLI should perform after the TUI exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateAction {
@@ -59,7 +71,70 @@ impl UpdateAction {
 }
 
 #[cfg(not(debug_assertions))]
+pub(crate) fn is_third_party_distribution() -> bool {
+    std::env::var(DISTRIBUTION_PACKAGE_ENV).is_ok_and(|package| package != OPENAI_CODEX_PACKAGE)
+}
+
+pub(crate) fn third_party_distribution() -> Option<DistributionInfo> {
+    let package = std::env::var(DISTRIBUTION_PACKAGE_ENV).ok()?;
+    if package == OPENAI_CODEX_PACKAGE {
+        return None;
+    }
+
+    Some(DistributionInfo {
+        package,
+        version: std::env::var(DISTRIBUTION_VERSION_ENV).ok(),
+        github_repo: std::env::var(DISTRIBUTION_REPOSITORY_ENV)
+            .ok()
+            .and_then(|repo| github_repo_slug(&repo)),
+    })
+}
+
+pub(crate) fn current_version(default_version: &str) -> String {
+    third_party_distribution()
+        .and_then(|info| info.version)
+        .unwrap_or_else(|| default_version.to_string())
+}
+
+pub(crate) fn release_notes_url() -> String {
+    third_party_distribution()
+        .and_then(|info| info.github_repo)
+        .map(|repo| format!("https://github.com/{repo}/releases/latest"))
+        .unwrap_or_else(|| "https://github.com/openai/codex/releases/latest".to_string())
+}
+
+pub(crate) fn installation_url() -> String {
+    third_party_distribution()
+        .and_then(|info| info.github_repo)
+        .map(|repo| format!("https://github.com/{repo}"))
+        .unwrap_or_else(|| "https://github.com/openai/codex".to_string())
+}
+
+fn github_repo_slug(repository: &str) -> Option<String> {
+    let trimmed = repository
+        .trim()
+        .trim_start_matches("git+")
+        .trim_end_matches(".git");
+    let after_host = trimmed
+        .strip_prefix("https://github.com/")
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))
+        .or_else(|| trimmed.strip_prefix("git@github.com:"))?;
+    let mut parts = after_host.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        None
+    } else {
+        Some(format!("{owner}/{repo}"))
+    }
+}
+
+#[cfg(not(debug_assertions))]
 pub fn get_update_action() -> Option<UpdateAction> {
+    if is_third_party_distribution() {
+        return None;
+    }
+
     UpdateAction::from_install_context(InstallContext::current())
 }
 
