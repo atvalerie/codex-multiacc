@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: rendered
+---
+■ Usage: /accounts [login|device-login|use <account_id>|remove <account_id>|logout <account_id>]

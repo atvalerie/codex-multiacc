@@ -5,6 +5,9 @@ use serde::Deserialize;
 use serde::Serialize;
 #[cfg(test)]
 use serial_test::serial;
+use sha2::Digest;
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Debug;
 use std::path::Path;
@@ -20,6 +23,7 @@ use codex_agent_identity::decode_agent_identity_jwt;
 use codex_agent_identity::fetch_agent_identity_jwks;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::AuthMode as ApiAuthMode;
+use codex_app_server_protocol::RateLimitSnapshot;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 
@@ -421,6 +425,9 @@ impl CodexAuth {
             }),
             last_refresh: Some(Utc::now()),
             agent_identity: None,
+            rate_limits: None,
+            active_account_id: None,
+            accounts: Default::default(),
         };
 
         let client = create_client();
@@ -537,6 +544,9 @@ pub fn login_with_api_key(
         tokens: None,
         last_refresh: None,
         agent_identity: None,
+        rate_limits: None,
+        active_account_id: None,
+        accounts: Default::default(),
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
@@ -559,6 +569,9 @@ pub async fn login_with_access_token(
         tokens: None,
         last_refresh: None,
         agent_identity: Some(access_token.to_string()),
+        rate_limits: None,
+        active_account_id: None,
+        accounts: Default::default(),
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
@@ -589,7 +602,15 @@ pub fn save_auth(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<()> {
     let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
-    storage.save(auth)
+    let auth = match storage.load() {
+        Ok(Some(stored_auth)) => stored_auth.with_active_account(auth.clone()),
+        Ok(None) => AuthDotJson::new_account_store(auth.clone()),
+        Err(err) => {
+            tracing::warn!("failed to load existing auth while saving new credentials: {err}");
+            AuthDotJson::new_account_store(auth.clone())
+        }
+    };
+    storage.save(&auth)
 }
 
 /// Load CLI auth data using the configured credential store backend.
@@ -603,6 +624,77 @@ pub fn load_auth_dot_json(
 ) -> std::io::Result<Option<AuthDotJson>> {
     let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
     storage.load()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredAuthAccount {
+    pub account_id: String,
+    pub label: String,
+    pub auth_mode: ApiAuthMode,
+    pub email: Option<String>,
+    pub plan_type: Option<AccountPlanType>,
+    pub rate_limits: Option<RateLimitSnapshot>,
+    pub active: bool,
+}
+
+pub fn list_auth_accounts(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<Vec<StoredAuthAccount>> {
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let Some(auth) = storage.load()? else {
+        return Ok(Vec::new());
+    };
+    Ok(auth.stored_accounts())
+}
+
+pub fn switch_auth_account(
+    codex_home: &Path,
+    account_id: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let Some(auth) = storage.load()? else {
+        return Err(std::io::Error::other("No stored accounts."));
+    };
+    let auth = auth
+        .select_account(account_id)
+        .ok_or_else(|| std::io::Error::other(format!("Unknown account: {account_id}")))?;
+    storage.save(&auth)
+}
+
+pub fn remove_auth_account(
+    codex_home: &Path,
+    account_id: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<bool> {
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let Some(auth) = storage.load()? else {
+        return Ok(false);
+    };
+    let Some(auth) = auth.remove_account(account_id) else {
+        return Ok(false);
+    };
+    if auth.accounts.is_empty() && auth.auth_mode.is_none() && auth.openai_api_key.is_none() {
+        storage.delete()?;
+    } else {
+        storage.save(&auth)?;
+    }
+    Ok(true)
+}
+
+pub fn persist_active_account_rate_limits(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    rate_limits: RateLimitSnapshot,
+) -> std::io::Result<()> {
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let Some(stored_auth) = storage.load()? else {
+        return Ok(());
+    };
+    let mut auth = stored_auth.active_auth();
+    auth.rate_limits = Some(rate_limits);
+    storage.save(&stored_auth.with_active_account(auth))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -766,6 +858,7 @@ async fn load_auth(
         Some(auth) => auth,
         None => return Ok(None),
     };
+    let auth_dot_json = auth_dot_json.active_auth();
 
     let auth = CodexAuth::from_auth_dot_json(
         codex_home,
@@ -784,9 +877,10 @@ fn persist_tokens(
     access_token: Option<String>,
     refresh_token: Option<String>,
 ) -> std::io::Result<AuthDotJson> {
-    let mut auth_dot_json = storage
+    let stored_auth = storage
         .load()?
         .ok_or(std::io::Error::other("Token data is not available."))?;
+    let mut auth_dot_json = stored_auth.active_auth();
 
     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
     if let Some(id_token) = id_token {
@@ -799,7 +893,7 @@ fn persist_tokens(
         tokens.refresh_token = refresh_token;
     }
     auth_dot_json.last_refresh = Some(Utc::now());
-    storage.save(&auth_dot_json)?;
+    storage.save(&stored_auth.with_active_account(auth_dot_json.clone()))?;
     Ok(auth_dot_json)
 }
 
@@ -926,6 +1020,168 @@ fn refresh_token_endpoint() -> String {
 }
 
 impl AuthDotJson {
+    fn account_id_for(auth: &AuthDotJson) -> String {
+        if let Some(account_id) = auth.tokens.as_ref().and_then(|tokens| {
+            tokens
+                .account_id
+                .clone()
+                .or(tokens.id_token.chatgpt_account_id.clone())
+        }) {
+            return account_id;
+        }
+        if let Some(agent_identity) = auth.agent_identity.as_deref()
+            && let Ok(record) = AgentIdentityAuthRecord::from_agent_identity_jwt(agent_identity)
+        {
+            return record.account_id;
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{:?}", auth.resolved_mode()));
+        if let Some(api_key) = auth.openai_api_key.as_deref() {
+            hasher.update(api_key);
+        }
+        if let Some(agent_identity) = auth.agent_identity.as_deref() {
+            hasher.update(agent_identity);
+        }
+        let digest = hasher.finalize();
+        let hex = format!("{digest:x}");
+        let truncated = hex.get(..16).unwrap_or(&hex);
+        format!("local-{truncated}")
+    }
+
+    fn display_label(&self) -> String {
+        if let Some(email) = self
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.id_token.email.clone())
+        {
+            return email;
+        }
+        if let Some(agent_identity) = self.agent_identity.as_deref()
+            && let Ok(record) = AgentIdentityAuthRecord::from_agent_identity_jwt(agent_identity)
+        {
+            return record.email;
+        }
+        match self.resolved_mode() {
+            ApiAuthMode::ApiKey => "API key".to_string(),
+            ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => "ChatGPT".to_string(),
+            ApiAuthMode::AgentIdentity => "Access token".to_string(),
+        }
+    }
+
+    fn sanitized_account(mut self) -> Self {
+        self.active_account_id = None;
+        self.accounts.clear();
+        self
+    }
+
+    fn copy_active_top_level_fields_from(&mut self, active: &AuthDotJson) {
+        self.auth_mode = active.auth_mode;
+        self.openai_api_key = active.openai_api_key.clone();
+        self.tokens = active.tokens.clone();
+        self.last_refresh = active.last_refresh;
+        self.agent_identity = active.agent_identity.clone();
+        self.rate_limits = active.rate_limits.clone();
+    }
+
+    fn new_account_store(auth: AuthDotJson) -> Self {
+        AuthDotJson::default().with_active_account(auth)
+    }
+
+    fn with_active_account(mut self, auth: AuthDotJson) -> Self {
+        let account_id = Self::account_id_for(&auth);
+        let active = auth.sanitized_account();
+        self.accounts.insert(account_id.clone(), active.clone());
+        self.active_account_id = Some(account_id);
+        self.copy_active_top_level_fields_from(&active);
+        self
+    }
+
+    fn active_auth(&self) -> Self {
+        if let Some(account_id) = self.active_account_id.as_deref()
+            && let Some(auth) = self.accounts.get(account_id)
+        {
+            return auth.clone().sanitized_account();
+        }
+        if let Some((_, auth)) = self.accounts.iter().next() {
+            return auth.clone().sanitized_account();
+        }
+        self.clone().sanitized_account()
+    }
+
+    fn select_account(mut self, account_id: &str) -> Option<Self> {
+        let active = self.accounts.get(account_id)?.clone();
+        self.active_account_id = Some(account_id.to_string());
+        self.copy_active_top_level_fields_from(&active);
+        Some(self)
+    }
+
+    fn remove_account(mut self, account_id: &str) -> Option<Self> {
+        self.accounts.remove(account_id)?;
+        if self.active_account_id.as_deref() == Some(account_id) {
+            self.active_account_id = self.accounts.keys().next().cloned();
+        }
+        if let Some(active_account_id) = self.active_account_id.clone()
+            && let Some(active) = self.accounts.get(&active_account_id).cloned()
+        {
+            self.copy_active_top_level_fields_from(&active);
+        } else {
+            self.auth_mode = None;
+            self.openai_api_key = None;
+            self.tokens = None;
+            self.last_refresh = None;
+            self.agent_identity = None;
+            self.rate_limits = None;
+        }
+        Some(self)
+    }
+
+    fn stored_accounts(&self) -> Vec<StoredAuthAccount> {
+        let mut accounts = BTreeMap::new();
+        if self.accounts.is_empty()
+            && (self.auth_mode.is_some()
+                || self.openai_api_key.is_some()
+                || self.tokens.is_some()
+                || self.agent_identity.is_some())
+        {
+            let account_id = Self::account_id_for(self);
+            accounts.insert(account_id, self.clone().sanitized_account());
+        } else {
+            for (account_id, auth) in &self.accounts {
+                accounts.insert(account_id.clone(), auth.clone().sanitized_account());
+            }
+        }
+
+        let active_account_id = self.active_account_id.clone().or_else(|| {
+            (accounts.len() == 1)
+                .then(|| accounts.keys().next().cloned())
+                .flatten()
+        });
+
+        accounts
+            .into_iter()
+            .map(|(account_id, auth)| StoredAuthAccount {
+                active: active_account_id.as_deref() == Some(account_id.as_str()),
+                label: auth.display_label(),
+                auth_mode: auth.resolved_mode(),
+                email: auth
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.id_token.email.clone()),
+                plan_type: auth.tokens.as_ref().map(|tokens| {
+                    tokens
+                        .id_token
+                        .chatgpt_plan_type
+                        .clone()
+                        .map(AccountPlanType::from)
+                        .unwrap_or(AccountPlanType::Unknown)
+                }),
+                rate_limits: auth.rate_limits,
+                account_id,
+            })
+            .collect()
+    }
+
     fn from_external_tokens(external: &ExternalAuthTokens) -> std::io::Result<Self> {
         let Some(chatgpt_metadata) = external.chatgpt_metadata() else {
             return Err(std::io::Error::other(
@@ -954,6 +1210,9 @@ impl AuthDotJson {
             tokens: Some(tokens),
             last_refresh: Some(Utc::now()),
             agent_identity: None,
+            rate_limits: None,
+            active_account_id: None,
+            accounts: Default::default(),
         })
     }
 

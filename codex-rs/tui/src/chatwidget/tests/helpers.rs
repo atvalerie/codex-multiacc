@@ -211,6 +211,8 @@ pub(super) async fn make_chatwidget_manual(
         rate_limit_warnings: RateLimitWarningState::default(),
         warning_display_state: WarningDisplayState::default(),
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+        rate_limit_auto_switch_requested: false,
+        scheduled_rate_limit_reset_at: None,
         add_credits_nudge_email_in_flight: None,
         adaptive_chunking: crate::streaming::chunking::AdaptiveChunkingPolicy::default(),
         stream_controller: None,

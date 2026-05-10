@@ -8,16 +8,21 @@
 //! support can request from users.
 
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::RateLimitSnapshot;
+use codex_app_server_protocol::RateLimitWindow;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::Config;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
 use codex_login::ServerOptions;
+use codex_login::list_auth_accounts;
 use codex_login::login_with_access_token;
 use codex_login::login_with_api_key;
 use codex_login::logout_with_revoke;
+use codex_login::remove_auth_account;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
+use codex_login::switch_auth_account;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
 use std::fs::OpenOptions;
@@ -398,6 +403,119 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
         }
         Err(e) => {
             eprintln!("Error checking login status: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn run_login_accounts(cli_config_overrides: CliConfigOverrides) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+
+    match list_auth_accounts(&config.codex_home, config.cli_auth_credentials_store_mode) {
+        Ok(accounts) if accounts.is_empty() => {
+            eprintln!("No stored accounts");
+            std::process::exit(1);
+        }
+        Ok(accounts) => {
+            for account in accounts {
+                let active = if account.active { "*" } else { " " };
+                let plan = account
+                    .plan_type
+                    .map(|plan| format!(" ({plan:?})"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "{active} {} [{}] {}{}{}",
+                    account.account_id,
+                    format!("{:?}", account.auth_mode).to_lowercase(),
+                    account.label,
+                    plan,
+                    account
+                        .rate_limits
+                        .as_ref()
+                        .and_then(rate_limit_summary)
+                        .map(|summary| format!(" - {summary}"))
+                        .unwrap_or_default()
+                );
+            }
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("Error listing accounts: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn rate_limit_summary(snapshot: &RateLimitSnapshot) -> Option<String> {
+    let primary = snapshot
+        .primary
+        .as_ref()
+        .map(|window| rate_limit_window_summary("5h", window));
+    let secondary = snapshot
+        .secondary
+        .as_ref()
+        .map(|window| rate_limit_window_summary("weekly", window));
+
+    match (primary, secondary) {
+        (Some(primary), Some(secondary)) => Some(format!("{primary}; {secondary}")),
+        (Some(primary), None) => Some(primary),
+        (None, Some(secondary)) => Some(secondary),
+        (None, None) => None,
+    }
+}
+
+fn rate_limit_window_summary(label: &str, window: &RateLimitWindow) -> String {
+    let percent_remaining = (100 - window.used_percent).clamp(0, 100);
+    let mut summary = format!("{label} {percent_remaining}% left");
+    if let Some(resets_at) = window.resets_at {
+        summary.push_str(&format!(" (resets at {resets_at})"));
+    }
+    summary
+}
+
+pub async fn run_login_use_account(
+    cli_config_overrides: CliConfigOverrides,
+    account_id: String,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+
+    match switch_auth_account(
+        &config.codex_home,
+        &account_id,
+        config.cli_auth_credentials_store_mode,
+    ) {
+        Ok(()) => {
+            eprintln!("Switched to account {account_id}");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("Error switching account: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn run_login_remove_account(
+    cli_config_overrides: CliConfigOverrides,
+    account_id: String,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+
+    match remove_auth_account(
+        &config.codex_home,
+        &account_id,
+        config.cli_auth_credentials_store_mode,
+    ) {
+        Ok(true) => {
+            eprintln!("Removed account {account_id}");
+            std::process::exit(0);
+        }
+        Ok(false) => {
+            eprintln!("Account not found: {account_id}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error removing account: {e}");
             std::process::exit(1);
         }
     }

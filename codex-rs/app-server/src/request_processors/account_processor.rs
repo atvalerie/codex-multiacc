@@ -94,6 +94,33 @@ impl AccountRequestProcessor {
         self.logout_v2(request_id).await.map(|()| None)
     }
 
+    pub(crate) async fn list_accounts(
+        &self,
+        params: ListAccountsParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.list_accounts_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn switch_account(
+        &self,
+        params: SwitchAccountParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.switch_account_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn remove_account(
+        &self,
+        params: RemoveAccountParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.remove_account_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn cancel_login_account(
         &self,
         params: CancelLoginAccountParams,
@@ -244,6 +271,162 @@ impl AccountRequestProcessor {
         invalid_request(
             "External auth is active. Use account/login/start (chatgptAuthTokens) to update it or account/logout to clear it.",
         )
+    }
+
+    fn stored_account(
+        account: codex_login::StoredAuthAccount,
+        rate_limits: Option<RateLimitSnapshot>,
+    ) -> StoredAccount {
+        StoredAccount {
+            account_id: account.account_id,
+            label: account.label,
+            auth_mode: account.auth_mode,
+            email: account.email,
+            plan_type: account.plan_type,
+            active: account.active,
+            rate_limits: rate_limits.or(account.rate_limits),
+        }
+    }
+
+    async fn list_accounts_response(
+        &self,
+        params: ListAccountsParams,
+    ) -> Result<ListAccountsResponse, JSONRPCErrorError> {
+        let accounts = list_auth_accounts(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to list accounts: {err}")))?;
+
+        let start = params
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                cursor
+                    .parse::<usize>()
+                    .map_err(|_| invalid_request(format!("invalid account list cursor: {cursor}")))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let limit = params.limit.unwrap_or(100).max(1) as usize;
+        let total = accounts.len();
+        let next_start = start.saturating_add(limit);
+        let active_rate_limits: Option<RateLimitSnapshot> =
+            if accounts.iter().any(|account| account.active) {
+                self.fetch_account_rate_limits()
+                    .await
+                    .ok()
+                    .map(|(snapshot, _)| snapshot.into())
+            } else {
+                None
+            };
+        if let Some(rate_limits) = active_rate_limits.clone()
+            && let Err(err) = codex_login::persist_active_account_rate_limits(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+                rate_limits,
+            )
+        {
+            tracing::warn!("failed to persist active account rate limits: {err}");
+        }
+        let data = accounts
+            .into_iter()
+            .skip(start)
+            .take(limit)
+            .map(|account| {
+                let rate_limits = account.active.then(|| active_rate_limits.clone()).flatten();
+                Self::stored_account(account, rate_limits)
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = (next_start < total).then(|| next_start.to_string());
+
+        Ok(ListAccountsResponse { data, next_cursor })
+    }
+
+    async fn switch_account_response(
+        &self,
+        params: SwitchAccountParams,
+    ) -> Result<SwitchAccountResponse, JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+
+        switch_auth_account(
+            &self.config.codex_home,
+            &params.account_id,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| invalid_request(format!("failed to switch account: {err}")))?;
+        self.auth_manager.reload().await;
+        self.config_manager.replace_cloud_requirements_loader(
+            self.auth_manager.clone(),
+            self.config.chatgpt_base_url.clone(),
+        );
+        self.config_manager
+            .sync_default_client_residency_requirement()
+            .await;
+        Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
+            &self.config_manager,
+            &self.thread_manager,
+            self.auth_manager.auth_cached(),
+        )
+        .await;
+
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountUpdated(
+                self.current_account_updated_notification(),
+            ))
+            .await;
+
+        let accounts = list_auth_accounts(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read switched account: {err}")))?;
+        let account = accounts
+            .into_iter()
+            .find(|account| account.active)
+            .map(|account| Self::stored_account(account, None));
+
+        Ok(SwitchAccountResponse { account })
+    }
+
+    async fn remove_account_response(
+        &self,
+        params: RemoveAccountParams,
+    ) -> Result<RemoveAccountResponse, JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+
+        let removed = remove_auth_account(
+            &self.config.codex_home,
+            &params.account_id,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to remove account: {err}")))?;
+        if removed {
+            self.auth_manager.reload().await;
+            self.config_manager.replace_cloud_requirements_loader(
+                self.auth_manager.clone(),
+                self.config.chatgpt_base_url.clone(),
+            );
+            self.config_manager
+                .sync_default_client_residency_requirement()
+                .await;
+            Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
+                &self.config_manager,
+                &self.thread_manager,
+                self.auth_manager.auth_cached(),
+            )
+            .await;
+            self.outgoing
+                .send_server_notification(ServerNotification::AccountUpdated(
+                    self.current_account_updated_notification(),
+                ))
+                .await;
+        }
+        Ok(RemoveAccountResponse { removed })
     }
 
     async fn login_api_key_common(
@@ -831,19 +1014,24 @@ impl AccountRequestProcessor {
     async fn get_account_rate_limits_response(
         &self,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
-        self.fetch_account_rate_limits()
-            .await
-            .map(
-                |(rate_limits, rate_limits_by_limit_id)| GetAccountRateLimitsResponse {
-                    rate_limits: rate_limits.into(),
-                    rate_limits_by_limit_id: Some(
-                        rate_limits_by_limit_id
-                            .into_iter()
-                            .map(|(limit_id, snapshot)| (limit_id, snapshot.into()))
-                            .collect(),
-                    ),
-                },
-            )
+        let (rate_limits, rate_limits_by_limit_id) = self.fetch_account_rate_limits().await?;
+        let response = GetAccountRateLimitsResponse {
+            rate_limits: rate_limits.into(),
+            rate_limits_by_limit_id: Some(
+                rate_limits_by_limit_id
+                    .into_iter()
+                    .map(|(limit_id, snapshot)| (limit_id, snapshot.into()))
+                    .collect(),
+            ),
+        };
+        if let Err(err) = codex_login::persist_active_account_rate_limits(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            response.rate_limits.clone(),
+        ) {
+            tracing::warn!("failed to persist active account rate limits: {err}");
+        }
+        Ok(response)
     }
 
     async fn send_add_credits_nudge_email_response(

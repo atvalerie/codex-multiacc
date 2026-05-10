@@ -1732,6 +1732,101 @@ async fn slash_mcp_invalid_args_show_usage() {
 }
 
 #[tokio::test]
+async fn slash_accounts_requests_account_list_via_app_server() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ListAccounts));
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_accounts_use_requests_account_switch_via_app_server() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(&mut chat, "/accounts use local-123");
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAccount { account_id }) if account_id == "local-123"
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_accounts_login_requests_browser_account_login_via_app_server() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(&mut chat, "/accounts login");
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::LoginAccount {
+            flow: AccountLoginFlow::Browser
+        })
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_accounts_device_login_requests_device_account_login_via_app_server() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(&mut chat, "/accounts device-login");
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::LoginAccount {
+            flow: AccountLoginFlow::DeviceCode
+        })
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_accounts_remove_requests_account_remove_via_app_server() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(&mut chat, "/accounts remove local-123");
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RemoveAccount { account_id }) if account_id == "local-123"
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_accounts_logout_requests_account_remove_via_app_server() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(&mut chat, "/accounts logout local-123");
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RemoveAccount { account_id }) if account_id == "local-123"
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_accounts_invalid_args_show_usage() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(&mut chat, "/accounts delete local-123");
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|cell| lines_to_single_string(cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("slash_accounts_invalid_args_show_usage", rendered);
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
 async fn slash_memories_opens_memory_menu() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);

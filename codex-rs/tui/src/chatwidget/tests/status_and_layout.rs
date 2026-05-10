@@ -551,6 +551,45 @@ async fn rate_limit_switch_prompt_skips_non_codex_limit() {
 }
 
 #[tokio::test]
+async fn exhausted_rate_limit_requests_next_account_switch_once() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let mut limits = snapshot(/*percent*/ 100.0);
+    limits.rate_limit_reached_type = Some(RateLimitReachedType::RateLimitReached);
+
+    chat.on_rate_limit_snapshot(Some(limits.clone()));
+    assert!(next_switch_to_next_account_event(&mut rx));
+
+    chat.on_rate_limit_snapshot(Some(limits));
+    assert!(!next_switch_to_next_account_event(&mut rx));
+}
+
+#[tokio::test]
+async fn exhausted_rate_limit_schedules_reset_notification() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let resets_at = Local::now().timestamp() + 1;
+    let mut limits = snapshot(/*percent*/ 100.0);
+    limits.rate_limit_reached_type = Some(RateLimitReachedType::RateLimitReached);
+    if let Some(primary) = limits.primary.as_mut() {
+        primary.resets_at = Some(resets_at);
+    }
+
+    chat.on_rate_limit_snapshot(Some(limits));
+
+    let event = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(event) = rx.recv().await
+                && matches!(event, AppEvent::RateLimitResetNotificationDue { .. })
+            {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("reset notification should be scheduled");
+    assert_matches!(event, AppEvent::RateLimitResetNotificationDue { resets_at: observed } if observed == resets_at);
+}
+
+#[tokio::test]
 async fn rate_limit_switch_prompt_shows_once_per_session() {
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.has_chatgpt_account = true;
@@ -967,6 +1006,17 @@ fn next_send_add_credits_nudge_email_event(
         }
     }
     panic!("expected SendAddCreditsNudgeEmail app event");
+}
+
+fn next_switch_to_next_account_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> bool {
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AppEvent::SwitchToNextAccountOnLimit) {
+            return true;
+        }
+    }
+    false
 }
 
 fn assert_no_owner_nudge_or_rate_limit_refresh(

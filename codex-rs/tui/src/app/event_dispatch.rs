@@ -320,6 +320,159 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
+            AppEvent::ListAccounts => match app_server.list_accounts().await {
+                Ok(response) => {
+                    if response.data.is_empty() {
+                        self.chat_widget.add_info_message(
+                            "No stored accounts found.".to_string(),
+                            Some("Use `/accounts login` to add an account.".to_string()),
+                        );
+                    } else {
+                        self.chat_widget.add_info_message(
+                            "Stored accounts:".to_string(),
+                            Some(
+                                "Use `/accounts use <account_id>` to switch or `/accounts login` to add another."
+                                    .to_string(),
+                            ),
+                        );
+                        for account in response.data {
+                            let (title, details) =
+                                super::account_list::account_summary_lines(&account);
+                            self.chat_widget.add_info_message(title, details);
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("failed to list accounts: {err}");
+                    self.chat_widget
+                        .add_error_message(format!("Account list failed: {err}"));
+                }
+            },
+            AppEvent::LoginAccount { flow } => match app_server.login_account(flow).await {
+                Ok(codex_app_server_protocol::LoginAccountResponse::Chatgpt {
+                    auth_url, ..
+                }) => {
+                    self.open_url_in_browser(auth_url.clone());
+                    self.chat_widget.add_info_message(
+                        "Started ChatGPT account login.".to_string(),
+                        Some(format!("Finish signing in in your browser: {auth_url}")),
+                    );
+                }
+                Ok(codex_app_server_protocol::LoginAccountResponse::ChatgptDeviceCode {
+                    verification_url,
+                    user_code,
+                    ..
+                }) => {
+                    self.chat_widget.add_info_message(
+                        "Started ChatGPT device login.".to_string(),
+                        Some(format!(
+                            "Open {verification_url} and enter code {user_code}."
+                        )),
+                    );
+                }
+                Ok(other) => {
+                    tracing::error!("unexpected account login response: {other:?}");
+                    self.chat_widget
+                        .add_error_message(format!("Unexpected account login response: {other:?}"));
+                }
+                Err(err) => {
+                    let flow_name = match flow {
+                        crate::app_event::AccountLoginFlow::Browser => "browser",
+                        crate::app_event::AccountLoginFlow::DeviceCode => "device-code",
+                    };
+                    tracing::error!("failed to start {flow_name} account login: {err}");
+                    self.chat_widget
+                        .add_error_message(format!("Account login failed: {err}"));
+                }
+            },
+            AppEvent::SwitchAccount { account_id } => {
+                match app_server.switch_account(account_id.clone()).await {
+                    Ok(()) => {
+                        self.chat_widget.add_info_message(
+                            format!("Switched to account {account_id}."),
+                            Some("New requests will use this account.".to_string()),
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!("failed to switch account: {err}");
+                        self.chat_widget
+                            .add_error_message(format!("Account switch failed: {err}"));
+                    }
+                }
+            }
+            AppEvent::RemoveAccount { account_id } => {
+                match app_server.remove_account(account_id.clone()).await {
+                    Ok(true) => self.chat_widget.add_info_message(
+                        format!("Removed account {account_id}."),
+                        Some("Use `/accounts` to see the remaining accounts.".to_string()),
+                    ),
+                    Ok(false) => self.chat_widget.add_info_message(
+                        format!("Account {account_id} was not found."),
+                        Some("Use `/accounts` to see stored accounts.".to_string()),
+                    ),
+                    Err(err) => {
+                        tracing::error!("failed to remove account: {err}");
+                        self.chat_widget
+                            .add_error_message(format!("Account remove failed: {err}"));
+                    }
+                }
+            }
+            AppEvent::SwitchToNextAccountOnLimit => match app_server.list_accounts().await {
+                Ok(response) => {
+                    let active_account_id = response
+                        .data
+                        .iter()
+                        .find(|account| account.active)
+                        .map(|account| account.account_id.clone());
+                    let next_account = response.data.into_iter().find(|account| !account.active);
+                    let Some(next_account) = next_account else {
+                        self.chat_widget.add_info_message(
+                            "Usage limit reached on the active account.".to_string(),
+                            Some("No alternate stored account is available.".to_string()),
+                        );
+                        return Ok(AppRunControl::Continue);
+                    };
+                    match app_server
+                        .switch_account(next_account.account_id.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            let active_label = active_account_id
+                                .unwrap_or_else(|| "the previous account".to_string());
+                            self.chat_widget.add_info_message(
+                                format!(
+                                    "Usage limit reached on {active_label}. Switched to account {}.",
+                                    next_account.account_id
+                                ),
+                                Some("Use `/accounts` to manage stored accounts.".to_string()),
+                            );
+                            self.refresh_rate_limits(
+                                app_server,
+                                RateLimitRefreshOrigin::StartupPrefetch,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!("failed to switch account after rate limit: {err}");
+                            self.chat_widget.add_error_message(format!(
+                                "Account switch after rate limit failed: {err}"
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("failed to list accounts after rate limit: {err}");
+                    self.chat_widget
+                        .add_error_message(format!("Account list after rate limit failed: {err}"));
+                }
+            },
+            AppEvent::RateLimitResetNotificationDue { resets_at } => {
+                tracing::info!(resets_at, "rate-limit reset notification due");
+                self.chat_widget.add_info_message(
+                    "A Codex usage limit has reset.".to_string(),
+                    Some("Refreshing account usage.".to_string()),
+                );
+                self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::StartupPrefetch);
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

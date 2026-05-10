@@ -811,6 +811,9 @@ pub(crate) async fn persist_tokens_async(
             tokens: Some(tokens),
             last_refresh: Some(Utc::now()),
             agent_identity: None,
+            rate_limits: None,
+            active_account_id: None,
+            accounts: Default::default(),
         };
         save_auth(&codex_home, &auth, auth_credentials_store_mode)
     })

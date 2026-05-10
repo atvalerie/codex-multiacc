@@ -787,6 +787,8 @@ pub(crate) struct ChatWidget {
     rate_limit_warnings: RateLimitWarningState,
     warning_display_state: WarningDisplayState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
+    rate_limit_auto_switch_requested: bool,
+    scheduled_rate_limit_reset_at: Option<i64>,
     add_credits_nudge_email_in_flight: Option<AddCreditsNudgeCreditType>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
@@ -2948,6 +2950,15 @@ impl ChatWidget {
                         .map(|w| f64::from(w.used_percent) >= RATE_LIMIT_SWITCH_PROMPT_THRESHOLD)
                         .unwrap_or(false));
 
+            let limit_reached = is_codex_limit && Self::rate_limit_snapshot_reached(&snapshot);
+            if limit_reached {
+                self.maybe_auto_switch_account_on_rate_limit();
+                self.maybe_schedule_rate_limit_reset_notification(&snapshot);
+            } else if is_codex_limit {
+                self.rate_limit_auto_switch_requested = false;
+                self.scheduled_rate_limit_reset_at = None;
+            }
+
             let has_workspace_credits = snapshot
                 .credits
                 .as_ref()
@@ -2983,6 +2994,51 @@ impl ChatWidget {
         }
         self.refresh_status_line();
     }
+
+    fn rate_limit_snapshot_reached(snapshot: &RateLimitSnapshot) -> bool {
+        snapshot.rate_limit_reached_type.is_some()
+            || snapshot
+                .primary
+                .as_ref()
+                .is_some_and(|window| window.used_percent >= 100)
+            || snapshot
+                .secondary
+                .as_ref()
+                .is_some_and(|window| window.used_percent >= 100)
+    }
+
+    fn maybe_auto_switch_account_on_rate_limit(&mut self) {
+        if self.rate_limit_auto_switch_requested {
+            return;
+        }
+        self.rate_limit_auto_switch_requested = true;
+        self.app_event_tx.send(AppEvent::SwitchToNextAccountOnLimit);
+    }
+
+    fn maybe_schedule_rate_limit_reset_notification(&mut self, snapshot: &RateLimitSnapshot) {
+        let now = Local::now().timestamp();
+        let resets_at = [snapshot.primary.as_ref(), snapshot.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|window| window.resets_at)
+            .filter(|resets_at| *resets_at > now)
+            .min();
+        let Some(resets_at) = resets_at else {
+            self.scheduled_rate_limit_reset_at = None;
+            return;
+        };
+        if self.scheduled_rate_limit_reset_at == Some(resets_at) {
+            return;
+        }
+        self.scheduled_rate_limit_reset_at = Some(resets_at);
+        let delay = resets_at.saturating_sub(now) as u64;
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            app_event_tx.send(AppEvent::RateLimitResetNotificationDue { resets_at });
+        });
+    }
+
     /// Finalize any active exec as failed and stop/clear agent-turn UI state.
     ///
     /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
@@ -4950,6 +5006,8 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             warning_display_state: WarningDisplayState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+            rate_limit_auto_switch_requested: false,
+            scheduled_rate_limit_reset_at: None,
             add_credits_nudge_email_in_flight: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,

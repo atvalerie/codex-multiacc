@@ -25,11 +25,17 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ListAccountsParams;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
+use codex_app_server_protocol::RemoveAccountParams;
+use codex_app_server_protocol::RemoveAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::SwitchAccountParams;
+use codex_app_server_protocol::SwitchAccountResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -925,6 +931,178 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     pretty_assertions::assert_eq!(payload.plan_type, None);
 
     assert!(codex_home.path().join("auth.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_list_switch_and_remove_handles_multiple_accounts() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp.send_login_account_api_key_request("sk-first").await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    assert_eq!(
+        to_response::<LoginAccountResponse>(resp)?,
+        LoginAccountResponse::ApiKey {}
+    );
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let req_id = mcp
+        .send_list_accounts_request(ListAccountsParams {
+            cursor: None,
+            limit: None,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let first_list: ListAccountsResponse = to_response(resp)?;
+    assert_eq!(first_list.next_cursor, None);
+    assert_eq!(first_list.data.len(), 1);
+    let first_account_id = first_list.data[0].account_id.clone();
+    assert_eq!(first_list.data[0].label, "API key");
+    assert_eq!(first_list.data[0].auth_mode, AuthMode::ApiKey);
+    assert!(first_list.data[0].active);
+
+    let req_id = mcp.send_login_account_api_key_request("sk-second").await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    assert_eq!(
+        to_response::<LoginAccountResponse>(resp)?,
+        LoginAccountResponse::ApiKey {}
+    );
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let req_id = mcp
+        .send_list_accounts_request(ListAccountsParams {
+            cursor: None,
+            limit: Some(1),
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let page: ListAccountsResponse = to_response(resp)?;
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(page.next_cursor, Some("1".to_string()));
+
+    let req_id = mcp
+        .send_list_accounts_request(ListAccountsParams {
+            cursor: None,
+            limit: None,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let accounts: ListAccountsResponse = to_response(resp)?;
+    assert_eq!(accounts.next_cursor, None);
+    assert_eq!(accounts.data.len(), 2);
+    assert!(accounts.data.iter().any(|account| {
+        account.account_id == first_account_id
+            && account.label == "API key"
+            && account.auth_mode == AuthMode::ApiKey
+            && !account.active
+    }));
+    let second_account_id = accounts
+        .data
+        .iter()
+        .find(|account| account.active)
+        .expect("second login should be active")
+        .account_id
+        .clone();
+    assert_ne!(second_account_id, first_account_id);
+
+    let req_id = mcp
+        .send_switch_account_request(SwitchAccountParams {
+            account_id: first_account_id.clone(),
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let switched: SwitchAccountResponse = to_response(resp)?;
+    let switched_account = switched
+        .account
+        .expect("switch should return active account");
+    assert_eq!(switched_account.account_id, first_account_id);
+    assert!(switched_account.active);
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let req_id = mcp
+        .send_remove_account_request(RemoveAccountParams {
+            account_id: first_account_id,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    assert!(to_response::<RemoveAccountResponse>(resp)?.removed);
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let req_id = mcp
+        .send_list_accounts_request(ListAccountsParams {
+            cursor: None,
+            limit: None,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let remaining: ListAccountsResponse = to_response(resp)?;
+    assert_eq!(remaining.next_cursor, None);
+    assert_eq!(remaining.data.len(), 1);
+    assert_eq!(remaining.data[0].account_id, second_account_id);
+    assert!(remaining.data[0].active);
+
     Ok(())
 }
 

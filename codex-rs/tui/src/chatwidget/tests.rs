@@ -6,6 +6,7 @@
 
 pub(super) use super::*;
 pub(super) use crate::app_command::AppCommand as Op;
+pub(super) use crate::app_event::AccountLoginFlow;
 pub(super) use crate::app_event::AppEvent;
 pub(super) use crate::app_event::ExitMode;
 #[cfg(not(target_os = "linux"))]

@@ -3,6 +3,8 @@ use crate::auth::storage::FileAuthStorage;
 use crate::auth::storage::get_auth_file;
 use crate::token_data::IdTokenInfo;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::RateLimitSnapshot;
+use codex_app_server_protocol::RateLimitWindow;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::KnownPlan as InternalKnownPlan;
 use codex_protocol::auth::PlanType as InternalPlanType;
@@ -241,6 +243,7 @@ async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
             }),
             last_refresh: Some(last_refresh),
             agent_identity: None,
+            ..Default::default()
         },
         auth_dot_json
     );
@@ -282,12 +285,52 @@ fn logout_removes_auth_file() -> Result<(), std::io::Error> {
         tokens: None,
         last_refresh: None,
         agent_identity: None,
+        ..Default::default()
     };
     super::save_auth(dir.path(), &auth_dot_json, AuthCredentialsStoreMode::File)?;
     let auth_file = get_auth_file(dir.path());
     assert!(auth_file.exists());
     assert!(logout(dir.path(), AuthCredentialsStoreMode::File)?);
     assert!(!auth_file.exists());
+    Ok(())
+}
+
+#[test]
+fn stored_accounts_include_cached_rate_limits() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    super::login_with_api_key(dir.path(), "sk-first", AuthCredentialsStoreMode::File)?;
+    let first_account_id = super::list_auth_accounts(dir.path(), AuthCredentialsStoreMode::File)?
+        .into_iter()
+        .next()
+        .expect("first account should be stored")
+        .account_id;
+    let rate_limits = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("Codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 95,
+            window_duration_mins: Some(300),
+            resets_at: Some(1_800),
+        }),
+        secondary: None,
+        credits: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    super::persist_active_account_rate_limits(
+        dir.path(),
+        AuthCredentialsStoreMode::File,
+        rate_limits.clone(),
+    )?;
+
+    super::login_with_api_key(dir.path(), "sk-second", AuthCredentialsStoreMode::File)?;
+    let accounts = super::list_auth_accounts(dir.path(), AuthCredentialsStoreMode::File)?;
+
+    let first_account = accounts
+        .iter()
+        .find(|account| account.account_id == first_account_id)
+        .expect("first account should still be listed");
+    assert_eq!(first_account.rate_limits, Some(rate_limits));
     Ok(())
 }
 

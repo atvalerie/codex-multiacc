@@ -29,6 +29,10 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::ListAccountsParams;
+use codex_app_server_protocol::ListAccountsResponse;
+use codex_app_server_protocol::LoginAccountParams;
+use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -37,6 +41,8 @@ use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::PermissionProfileModificationParams;
 use codex_app_server_protocol::PermissionProfileSelectionParams;
 use codex_app_server_protocol::RateLimitSnapshot;
+use codex_app_server_protocol::RemoveAccountParams;
+use codex_app_server_protocol::RemoveAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
@@ -44,6 +50,8 @@ use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::SwitchAccountParams;
+use codex_app_server_protocol::SwitchAccountResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
@@ -117,6 +125,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::ContextCompat;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+
+use crate::app_event::AccountLoginFlow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -730,6 +740,63 @@ impl AppServerSession {
             .await
             .wrap_err("account/logout failed in TUI")?;
         Ok(())
+    }
+
+    pub(crate) async fn list_accounts(&mut self) -> Result<ListAccountsResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ListAccounts {
+                request_id,
+                params: ListAccountsParams {
+                    cursor: None,
+                    limit: None,
+                },
+            })
+            .await
+            .wrap_err("account/list failed in TUI")
+    }
+
+    pub(crate) async fn login_account(
+        &mut self,
+        flow: AccountLoginFlow,
+    ) -> Result<LoginAccountResponse> {
+        let request_id = self.next_request_id();
+        let params = match flow {
+            AccountLoginFlow::Browser => LoginAccountParams::Chatgpt {
+                codex_streamlined_login: false,
+            },
+            AccountLoginFlow::DeviceCode => LoginAccountParams::ChatgptDeviceCode,
+        };
+        self.client
+            .request_typed(ClientRequest::LoginAccount { request_id, params })
+            .await
+            .wrap_err("account/login/start failed in TUI")
+    }
+
+    pub(crate) async fn switch_account(&mut self, account_id: String) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: SwitchAccountResponse = self
+            .client
+            .request_typed(ClientRequest::SwitchAccount {
+                request_id,
+                params: SwitchAccountParams { account_id },
+            })
+            .await
+            .wrap_err("account/switch failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn remove_account(&mut self, account_id: String) -> Result<bool> {
+        let request_id = self.next_request_id();
+        let response: RemoveAccountResponse = self
+            .client
+            .request_typed(ClientRequest::RemoveAccount {
+                request_id,
+                params: RemoveAccountParams { account_id },
+            })
+            .await
+            .wrap_err("account/remove failed in TUI")?;
+        Ok(response.removed)
     }
 
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {

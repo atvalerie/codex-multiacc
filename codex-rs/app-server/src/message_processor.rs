@@ -1213,6 +1213,15 @@ impl MessageProcessor {
                     .logout_account(request_id.clone())
                     .await
             }
+            ClientRequest::ListAccounts { params, .. } => {
+                self.account_processor.list_accounts(params).await
+            }
+            ClientRequest::SwitchAccount { params, .. } => {
+                self.account_processor.switch_account(params).await
+            }
+            ClientRequest::RemoveAccount { params, .. } => {
+                self.account_processor.remove_account(params).await
+            }
             ClientRequest::CancelLoginAccount { params, .. } => {
                 self.account_processor.cancel_login_account(params).await
             }

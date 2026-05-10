@@ -7,6 +7,7 @@
 
 use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
+use crate::app_event::AccountLoginFlow;
 use crate::app_event::ThreadGoalSetMode;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
@@ -36,6 +37,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str = "Press Esc to return to the ma
 const GOAL_USAGE: &str = "Usage: /goal <objective>";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const ACCOUNTS_USAGE: &str = "Usage: /accounts [login|device-login|use <account_id>|remove <account_id>|logout <account_id>]";
 
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
@@ -425,6 +427,9 @@ impl ChatWidget {
             SlashCommand::Plugins => {
                 self.add_plugins_output();
             }
+            SlashCommand::Accounts => {
+                self.app_event_tx.send(AppEvent::ListAccounts);
+            }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
                     self.add_info_message(
@@ -593,6 +598,33 @@ impl ChatWidget {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
                 _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
             },
+            SlashCommand::Accounts => {
+                let mut parts = trimmed.split_whitespace();
+                match (parts.next(), parts.next(), parts.next()) {
+                    (None, None, None) => self.app_event_tx.send(AppEvent::ListAccounts),
+                    (Some("login"), None, None) => {
+                        self.app_event_tx.send(AppEvent::LoginAccount {
+                            flow: AccountLoginFlow::Browser,
+                        });
+                    }
+                    (Some("device-login"), None, None) => {
+                        self.app_event_tx.send(AppEvent::LoginAccount {
+                            flow: AccountLoginFlow::DeviceCode,
+                        });
+                    }
+                    (Some("use"), Some(account_id), None) => {
+                        self.app_event_tx.send(AppEvent::SwitchAccount {
+                            account_id: account_id.to_string(),
+                        });
+                    }
+                    (Some("remove" | "logout"), Some(account_id), None) => {
+                        self.app_event_tx.send(AppEvent::RemoveAccount {
+                            account_id: account_id.to_string(),
+                        });
+                    }
+                    _ => self.add_error_message(ACCOUNTS_USAGE.to_string()),
+                }
+            }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
                 "debug" => {
@@ -918,6 +950,7 @@ impl ChatWidget {
             | SlashCommand::Mcp
             | SlashCommand::Apps
             | SlashCommand::Plugins
+            | SlashCommand::Accounts
             | SlashCommand::Rollout
             | SlashCommand::Copy
             | SlashCommand::Raw

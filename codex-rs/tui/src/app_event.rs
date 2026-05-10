@@ -201,6 +201,32 @@ pub(crate) enum AppEvent {
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
 
+    /// List stored Codex accounts.
+    ListAccounts,
+
+    /// Start a login flow for another Codex account.
+    LoginAccount {
+        flow: AccountLoginFlow,
+    },
+
+    /// Switch the active Codex account.
+    SwitchAccount {
+        account_id: String,
+    },
+
+    /// Remove a stored Codex account.
+    RemoveAccount {
+        account_id: String,
+    },
+
+    /// Switch to the next stored Codex account after the active account hits a limit.
+    SwitchToNextAccountOnLimit,
+
+    /// Notify the user that a previously reached usage limit should have reset.
+    RateLimitResetNotificationDue {
+        resets_at: i64,
+    },
+
     /// Request to exit the application due to a fatal error.
     #[allow(dead_code)]
     FatalExitRequest(String),
@@ -926,6 +952,12 @@ pub(crate) enum AppEvent {
         context: String,
         action: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountLoginFlow {
+    Browser,
+    DeviceCode,
 }
 
 #[derive(Debug)]

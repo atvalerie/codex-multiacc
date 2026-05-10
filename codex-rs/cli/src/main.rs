@@ -15,7 +15,10 @@ use codex_cli::SeatbeltCommand;
 use codex_cli::WindowsCommand;
 use codex_cli::read_access_token_from_stdin;
 use codex_cli::read_api_key_from_stdin;
+use codex_cli::run_login_accounts;
+use codex_cli::run_login_remove_account;
 use codex_cli::run_login_status;
+use codex_cli::run_login_use_account;
 use codex_cli::run_login_with_access_token;
 use codex_cli::run_login_with_api_key;
 use codex_cli::run_login_with_chatgpt;
@@ -405,6 +408,26 @@ struct LoginCommand {
 enum LoginSubcommand {
     /// Show login status.
     Status,
+    /// List stored accounts.
+    #[command(alias = "list")]
+    Accounts,
+    /// Switch the active stored account.
+    Use(LoginUseCommand),
+    /// Remove a stored account.
+    #[command(alias = "logout")]
+    Remove(LoginRemoveCommand),
+}
+
+#[derive(Debug, Parser)]
+struct LoginUseCommand {
+    #[arg(value_name = "ACCOUNT_ID")]
+    account_id: String,
+}
+
+#[derive(Debug, Parser)]
+struct LoginRemoveCommand {
+    #[arg(value_name = "ACCOUNT_ID")]
+    account_id: String,
 }
 
 #[derive(Debug, Parser)]
@@ -1083,6 +1106,15 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             match login_cli.action {
                 Some(LoginSubcommand::Status) => {
                     run_login_status(login_cli.config_overrides).await;
+                }
+                Some(LoginSubcommand::Accounts) => {
+                    run_login_accounts(login_cli.config_overrides).await;
+                }
+                Some(LoginSubcommand::Use(LoginUseCommand { account_id })) => {
+                    run_login_use_account(login_cli.config_overrides, account_id).await;
+                }
+                Some(LoginSubcommand::Remove(LoginRemoveCommand { account_id })) => {
+                    run_login_remove_account(login_cli.config_overrides, account_id).await;
                 }
                 None => {
                     if login_cli.with_api_key && login_cli.with_access_token {
