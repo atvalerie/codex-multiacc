@@ -1,0 +1,139 @@
+name: cowodex-debug-npm-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "npm package version to stamp into @local/cowodex"
+        required: true
+        default: "0.0.0-debug.0"
+
+concurrency:
+  group: cowodex-debug-npm-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Package Windows debug npm tarball
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+
+      - name: Install packaging dependencies
+        shell: pwsh
+        run: |
+          choco install ripgrep -y --no-progress
+
+      - name: Build Windows debug binaries
+        working-directory: codex-rs
+        shell: pwsh
+        run: |
+          cargo build -p codex-cli --bin codex
+          cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+
+      - name: Build package staging directory
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = "x86_64-pc-windows-msvc"
+          $debugDir = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\debug"
+          $vendorRoot = Join-Path $env:GITHUB_WORKSPACE "staging\vendor\$target"
+          $vendorCodex = Join-Path $vendorRoot "codex"
+          $vendorPath = Join-Path $vendorRoot "path"
+          New-Item -ItemType Directory -Force $vendorCodex, $vendorPath, "staging\bin", "dist\npm-debug" | Out-Null
+
+          function Test-RipgrepBinary {
+            param([string]$Path)
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+              return $false
+            }
+
+            $description = (Get-Item -LiteralPath $Path).VersionInfo.FileDescription
+            if ($description -like "*ShimGen generated shim*") {
+              return $false
+            }
+
+            try {
+              $output = & $Path --version 2>$null
+              return $LASTEXITCODE -eq 0 -and $output -match "^ripgrep "
+            } catch {
+              return $false
+            }
+          }
+
+          function Get-RipgrepBinaryForPackaging {
+            $candidates = @()
+            $pathCandidates = Get-Command rg.exe -All -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Source }
+            if ($pathCandidates) {
+              $candidates += $pathCandidates
+            }
+
+            $chocolateyRoot = if ([string]::IsNullOrWhiteSpace($env:ChocolateyInstall)) {
+              "C:\ProgramData\chocolatey"
+            } else {
+              $env:ChocolateyInstall
+            }
+            $chocolateyRipgrepRoot = Join-Path $chocolateyRoot "lib\ripgrep\tools"
+            if (Test-Path -LiteralPath $chocolateyRipgrepRoot -PathType Container) {
+              $candidates += Get-ChildItem -LiteralPath $chocolateyRipgrepRoot -Recurse -Filter rg.exe -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName }
+            }
+
+            foreach ($candidate in $candidates | Select-Object -Unique) {
+              if (Test-RipgrepBinary -Path $candidate) {
+                return $candidate
+              }
+            }
+
+            throw "A usable rg.exe was not found for packaging."
+          }
+
+          Copy-Item (Join-Path $debugDir "codex.exe") (Join-Path $vendorCodex "codex.exe") -Force
+          Copy-Item (Join-Path $debugDir "codex-windows-sandbox-setup.exe") (Join-Path $vendorCodex "codex-windows-sandbox-setup.exe") -Force
+          Copy-Item (Join-Path $debugDir "codex-command-runner.exe") (Join-Path $vendorCodex "codex-command-runner.exe") -Force
+          Copy-Item (Get-RipgrepBinaryForPackaging) (Join-Path $vendorPath "rg.exe") -Force
+
+          Copy-Item "codex-cli\bin\*" "staging\bin" -Recurse -Force
+          Copy-Item "codex-cli\package.json" "staging\package.json" -Force
+          Copy-Item "README.md" "staging\README.md" -Force
+
+          node -e @"
+          const fs = require("fs");
+          const packageJsonPath = "staging/package.json";
+          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+          packageJson.name = "@local/cowodex";
+          packageJson.version = process.env.VERSION;
+          packageJson.repository = {
+            type: "git",
+            url: "git+https://github.com/atvalerie/codex-multiacc.git",
+          };
+          packageJson.files = ["bin", "vendor"];
+          packageJson.bin = {
+            codex: "bin/codex.js",
+            cowodex: "bin/codex.js",
+          };
+          delete packageJson.optionalDependencies;
+          fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + "\n");
+          "@
+
+      - name: Pack npm tarball
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+          pnpm --dir staging pack --pack-destination "$env:GITHUB_WORKSPACE\dist\npm-debug"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cowodex-debug-npm-windows
+          path: dist/npm-debug/*.tgz
+          if-no-files-found: error
