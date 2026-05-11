@@ -190,11 +190,59 @@ jobs:
           $vendorPath = Join-Path $vendorRoot "path"
           New-Item -ItemType Directory -Force $vendorCodex, $vendorPath | Out-Null
 
+          function Test-RipgrepBinary {
+            param([string]$Path)
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+              return $false
+            }
+
+            $description = (Get-Item -LiteralPath $Path).VersionInfo.FileDescription
+            if ($description -like "*ShimGen generated shim*") {
+              return $false
+            }
+
+            try {
+              $output = & $Path --version 2>$null
+              return $LASTEXITCODE -eq 0 -and $output -match "^ripgrep "
+            } catch {
+              return $false
+            }
+          }
+
+          function Get-RipgrepBinaryForPackaging {
+            $candidates = @()
+            $pathCandidates = Get-Command rg.exe -All -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Source }
+            if ($pathCandidates) {
+              $candidates += $pathCandidates
+            }
+
+            $chocolateyRoot = if ([string]::IsNullOrWhiteSpace($env:ChocolateyInstall)) {
+              "C:\ProgramData\chocolatey"
+            } else {
+              $env:ChocolateyInstall
+            }
+            $chocolateyRipgrepRoot = Join-Path $chocolateyRoot "lib\ripgrep\tools"
+            if (Test-Path -LiteralPath $chocolateyRipgrepRoot -PathType Container) {
+              $candidates += Get-ChildItem -LiteralPath $chocolateyRipgrepRoot -Recurse -Filter rg.exe -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName }
+            }
+
+            foreach ($candidate in $candidates | Select-Object -Unique) {
+              if (Test-RipgrepBinary -Path $candidate) {
+                return $candidate
+              }
+            }
+
+            throw "A usable rg.exe was not found for packaging."
+          }
+
           if ("${{ matrix.os }}" -eq "windows") {
             Copy-Item (Join-Path $debugDir "codex.exe") (Join-Path $vendorCodex "codex.exe") -Force
             Copy-Item (Join-Path $debugDir "codex-windows-sandbox-setup.exe") (Join-Path $vendorCodex "codex-windows-sandbox-setup.exe") -Force
             Copy-Item (Join-Path $debugDir "codex-command-runner.exe") (Join-Path $vendorCodex "codex-command-runner.exe") -Force
-            $rg = (Get-Command rg.exe).Source
+            $rg = Get-RipgrepBinaryForPackaging
             Copy-Item $rg (Join-Path $vendorPath "rg.exe") -Force
           } else {
             Copy-Item (Join-Path $debugDir "codex") (Join-Path $vendorCodex "codex") -Force

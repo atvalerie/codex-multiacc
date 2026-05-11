@@ -36,6 +36,76 @@ if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
     throw "pnpm is required. Install pnpm first, then rerun this script."
 }
 
+function Test-IsShimExe {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    $description = (Get-Item -LiteralPath $Path).VersionInfo.FileDescription
+    return $description -like "*ShimGen generated shim*"
+}
+
+function Test-RipgrepBinary {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    if (Test-IsShimExe -Path $Path) {
+        return $false
+    }
+
+    try {
+        $output = & $Path --version 2>$null
+        return $LASTEXITCODE -eq 0 -and $output -match "^ripgrep "
+    } catch {
+        return $false
+    }
+}
+
+function Get-RipgrepBinaryForPackaging {
+    param(
+        [string]$TargetTriple,
+        [string]$CodexCli
+    )
+
+    $candidates = @(
+        (Join-Path $CodexCli "vendor\$TargetTriple\path\rg.exe")
+    )
+
+    $pathCandidates = Get-Command rg.exe -All -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Source }
+    if ($pathCandidates) {
+        $candidates += $pathCandidates
+    }
+
+    $chocolateyRoot = if ([string]::IsNullOrWhiteSpace($env:ChocolateyInstall)) {
+        "C:\ProgramData\chocolatey"
+    } else {
+        $env:ChocolateyInstall
+    }
+    $chocolateyRipgrepRoot = Join-Path $chocolateyRoot "lib\ripgrep\tools"
+    if (Test-Path -LiteralPath $chocolateyRipgrepRoot -PathType Container) {
+        $candidates += Get-ChildItem -LiteralPath $chocolateyRipgrepRoot -Recurse -Filter rg.exe -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName }
+    }
+
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if (Test-RipgrepBinary -Path $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
 if ($BinName.Count -eq 0) {
     throw "At least one bin name is required."
 }
@@ -76,11 +146,11 @@ if ($TargetTriple -like "*windows*") {
     }
 }
 
-$rg = Get-Command rg -ErrorAction SilentlyContinue
+$rg = Get-RipgrepBinaryForPackaging -TargetTriple $TargetTriple -CodexCli $codexCli
 if ($rg) {
-    Copy-Item $rg.Source (Join-Path $vendorPath "rg.exe") -Force
+    Copy-Item $rg (Join-Path $vendorPath "rg.exe") -Force
 } else {
-    Write-Warning "rg.exe was not found on PATH; packaged Codex will still run, but search tools may be unavailable."
+    Write-Warning "A usable rg.exe was not found; packaged Codex will still run, but search tools may be unavailable."
 }
 
 $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) "codex-debug-npm"
